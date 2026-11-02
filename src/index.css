@@ -11,10 +11,12 @@
   font-optical-sizing: auto;
   font-weight: 400;
 
-  --color-ink: #23332d;
-  --color-muted: #829089;
-  --color-green: #226b50;
-  --color-green-dark: #194f3c;
+  --color-ink: #173149;
+  --color-muted: #82909a;
+  --color-green: #12324b;
+  --color-green-dark: #0c263b;
+  --color-accent: #00c5ce;
+  --color-accent-soft: #e6f9fa;
   --color-border: #e9ede9;
   --color-background: #f7f8f6;
   --font-display: 'Manrope', 'DM Sans', sans-serif;
@@ -53,11 +55,11 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 3px solid rgb(54 135 100 / 30%);
+  outline: 3px solid rgb(0 172 184 / 35%);
   outline-offset: 2px;
 }
 
 ::selection {
   color: #fff;
-  background: #398460;
+  background: #087c91;
 }

@@ -2,6 +2,7 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
+import { getAuth } from "firebase/auth";
 
 // Você pegará essas chaves no site do Firebase Console (console.firebase.google.com)
 const firebaseConfig = {
@@ -19,3 +20,4 @@ const app = initializeApp(firebaseConfig);
 // Exporta as funções de Banco de Dados (Firestore) e Arquivos (Storage)
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+export const auth = getAuth(app);

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  addDoc,
   arrayUnion,
   collection,
   deleteDoc,
@@ -12,13 +13,17 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { auth, db } from './firebase';
+import logo from './assets/logo.png';
 import './App.css';
 
 const moeda = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
   currency: 'BRL',
 });
+
+const diasVencimento = [1, 5, 10, 15, 20, 25, 30];
 
 const formatarMoeda = (valor) => moeda.format(valor || 0);
 const dataHoje = new Intl.DateTimeFormat('pt-BR', {
@@ -29,19 +34,27 @@ const dataHoje = new Intl.DateTimeFormat('pt-BR', {
 }).format(new Date()).toLocaleUpperCase('pt-BR');
 
 export default function App() {
-  const lotes = [
-    { id: 1, nome: 'Lote 1', valor: 500.00 },
-    { id: 2, nome: 'Lote 2', valor: 650.00 },
-  ];
-
   const [nome, setNome] = useState('');
   const [email, setEmail] = useState('');
   const [celular, setCelular] = useState('');
-  const [loteSelecionado, setLoteSelecionado] = useState(lotes[0].valor);
+  const [lotes, setLotes] = useState([]);
+  const [loteSelecionado, setLoteSelecionado] = useState('');
+  const [carregandoLotes, setCarregandoLotes] = useState(true);
+  const [modalLotesAberto, setModalLotesAberto] = useState(false);
+  const [nomeNovoLote, setNomeNovoLote] = useState('');
+  const [valorNovoLote, setValorNovoLote] = useState('');
   const [parcelas, setParcelas] = useState(1);
   const [diaVencimento, setDiaVencimento] = useState('');
   const [participantes, setParticipantes] = useState([]);
   const [termoPesquisa, setTermoPesquisa] = useState('');
+  const [usuario, setUsuario] = useState(null);
+  const [carregandoAuth, setCarregandoAuth] = useState(true);
+  const [emailLogin, setEmailLogin] = useState('');
+  const [senhaLogin, setSenhaLogin] = useState('');
+  const [carregandoLogin, setCarregandoLogin] = useState(false);
+  const [erroLogin, setErroLogin] = useState('');
+  const [notificacao, setNotificacao] = useState(null);
+  const proximoIdNotificacao = useRef(0);
   const [modalPagamento, setModalPagamento] = useState({
     aberto: false,
     participante: null,
@@ -49,9 +62,45 @@ export default function App() {
     valorPersonalizado: '',
   });
 
-  const valorParcela = parcelas > 0 ? (loteSelecionado / parcelas).toFixed(2) : '0.00';
+  const mostrarNotificacao = (mensagem, tipo = 'sucesso') => {
+    proximoIdNotificacao.current += 1;
+    setNotificacao({ id: proximoIdNotificacao.current, mensagem, tipo });
+  };
 
   useEffect(() => {
+    if (!notificacao) return undefined;
+    const timeout = window.setTimeout(() => {
+      setNotificacao((atual) => (atual?.id === notificacao.id ? null : atual));
+    }, 5000);
+    return () => window.clearTimeout(timeout);
+  }, [notificacao]);
+
+  const lotesAtivos = lotes.filter((lote) => lote.ativo);
+  const loteAtual = lotesAtivos.find((lote) => lote.id === loteSelecionado);
+  const valorParcela = loteAtual && parcelas > 0 ? (loteAtual.valor / parcelas).toFixed(2) : '0.00';
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (usuarioAutenticado) => {
+        setUsuario(usuarioAutenticado);
+        setCarregandoAuth(false);
+      },
+      (error) => {
+        console.error('Erro ao verificar autenticação: ', error);
+        setErroLogin('Não foi possível verificar sua autenticação. Atualize a página e tente novamente.');
+        setCarregandoAuth(false);
+      },
+    );
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!usuario) {
+      setParticipantes([]);
+      return undefined;
+    }
+
     const q = query(collection(db, 'Participantes'), orderBy('numero_id', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const lista = snapshot.docs.map((participante) => ({
@@ -59,9 +108,73 @@ export default function App() {
         ...participante.data(),
       }));
       setParticipantes(lista);
+    }, (error) => {
+      console.error('Erro ao carregar participantes: ', error);
+      mostrarNotificacao('Não foi possível carregar os participantes. Verifique as regras de acesso do Firestore.', 'erro');
     });
     return () => unsubscribe();
-  }, []);
+  }, [usuario]);
+
+  useEffect(() => {
+    if (!usuario) {
+      setLotes([]);
+      setLoteSelecionado('');
+      setCarregandoLotes(false);
+      return undefined;
+    }
+
+    setCarregandoLotes(true);
+    const unsubscribe = onSnapshot(collection(db, 'Lotes'), (snapshot) => {
+      const lista = snapshot.docs.map((lote) => ({
+        id: lote.id,
+        ...lote.data(),
+      })).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+      setLotes(lista);
+      setCarregandoLotes(false);
+    }, (error) => {
+      console.error('Erro ao carregar lotes: ', error);
+      mostrarNotificacao('Não foi possível carregar os lotes cadastrados.', 'erro');
+      setCarregandoLotes(false);
+    });
+    return () => unsubscribe();
+  }, [usuario]);
+
+  useEffect(() => {
+    if (!lotes.some((lote) => lote.ativo && lote.id === loteSelecionado)) {
+      setLoteSelecionado(lotes.find((lote) => lote.ativo)?.id || '');
+    }
+  }, [lotes, loteSelecionado]);
+
+  const handleEntrar = async (event) => {
+    event.preventDefault();
+    setErroLogin('');
+    setCarregandoLogin(true);
+
+    try {
+      await signInWithEmailAndPassword(auth, emailLogin.trim(), senhaLogin);
+    } catch (error) {
+      console.error('Erro ao entrar: ', error);
+      const mensagens = {
+        'auth/invalid-credential': 'E-mail ou senha incorretos.',
+        'auth/user-disabled': 'Esta conta foi desativada.',
+        'auth/too-many-requests': 'Muitas tentativas. Aguarde um momento e tente novamente.',
+        'auth/network-request-failed': 'Não foi possível conectar. Verifique sua internet e tente novamente.',
+        'auth/operation-not-allowed': 'O login por e-mail e senha não está ativado no Firebase.',
+      };
+      setErroLogin(mensagens[error.code] || 'Não foi possível entrar. Verifique suas credenciais e tente novamente.');
+    } finally {
+      setCarregandoLogin(false);
+    }
+  };
+
+  const handleSair = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('Erro ao sair: ', error);
+      mostrarNotificacao('Não foi possível encerrar a sessão. Tente novamente.', 'erro');
+    }
+  };
 
   const totalEsperado = participantes.reduce((acc, participante) => acc + (participante.valor_total || 0), 0);
   const totalPendente = participantes.reduce((acc, participante) => acc + (participante.saldo_devedor || 0), 0);
@@ -80,9 +193,47 @@ export default function App() {
     return `(${v.slice(0, 2)}) ${v.slice(2, 7)}-${v.slice(7)}`;
   };
 
+  const handleSalvarLote = async (event) => {
+    event.preventDefault();
+    const nomeLimpo = nomeNovoLote.trim();
+    const valor = Number(valorNovoLote);
+    if (!nomeLimpo || !Number.isFinite(valor) || valor <= 0) {
+      mostrarNotificacao('Informe o nome do lote e um valor maior que zero.', 'erro');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'Lotes'), {
+        nome: nomeLimpo,
+        valor,
+        ativo: true,
+      });
+      setNomeNovoLote('');
+      setValorNovoLote('');
+      mostrarNotificacao('Lote cadastrado e habilitado com sucesso.');
+    } catch (error) {
+      console.error('Erro ao cadastrar lote: ', error);
+      mostrarNotificacao('Não foi possível cadastrar o lote.', 'erro');
+    }
+  };
+
+  const alternarLote = async (lote) => {
+    try {
+      await updateDoc(doc(db, 'Lotes', lote.id), { ativo: !lote.ativo });
+      mostrarNotificacao(lote.ativo ? 'Lote desabilitado.' : 'Lote habilitado.');
+    } catch (error) {
+      console.error('Erro ao atualizar lote: ', error);
+      mostrarNotificacao('Não foi possível atualizar o lote.', 'erro');
+    }
+  };
+
   const handleSalvar = async () => {
-    if (!nome || !diaVencimento || !parcelas) {
-      alert('Por favor, preencha os campos obrigatórios (nome, parcelas e dia de vencimento).');
+    if (!nome || !diaVencimento || !parcelas || !loteAtual) {
+      if (!loteAtual) {
+        mostrarNotificacao('Cadastre e habilite um lote antes de adicionar participantes.', 'erro');
+        return;
+      }
+      mostrarNotificacao('Por favor, preencha os campos obrigatórios (nome, parcelas e dia de vencimento).', 'erro');
       return;
     }
 
@@ -100,11 +251,11 @@ export default function App() {
         nome,
         email,
         celular,
-        valor_total: loteSelecionado,
+        valor_total: loteAtual.valor,
         quantidade_parcelas: parcelas,
         valor_parcela: Number(valorParcela),
         dia_vencimento: diaVencimento,
-        saldo_devedor: loteSelecionado,
+        saldo_devedor: loteAtual.valor,
         historico_pagamentos: [],
       });
 
@@ -113,15 +264,16 @@ export default function App() {
       setCelular('');
       setDiaVencimento('');
       setParcelas(1);
+      mostrarNotificacao('Participante cadastrado com sucesso.');
     } catch (error) {
       console.error('Erro ao guardar documento: ', error);
-      alert('Erro ao guardar os dados.');
+      mostrarNotificacao('Erro ao guardar os dados.', 'erro');
     }
   };
 
   const abrirModal = (participante) => {
     if (participante.saldo_devedor <= 0) {
-      alert('Este participante já tem o saldo totalmente pago!');
+      mostrarNotificacao('Este participante já tem o saldo totalmente pago.', 'erro');
       return;
     }
     setModalPagamento({
@@ -136,15 +288,17 @@ export default function App() {
     const participante = modalPagamento.participante;
     const valorAAbater = modalPagamento.tipo === 'fixo'
       ? participante.valor_parcela
-      : Number(modalPagamento.valorPersonalizado);
+      : modalPagamento.tipo === 'avista'
+        ? participante.saldo_devedor
+        : Number(modalPagamento.valorPersonalizado);
 
     if (!valorAAbater || valorAAbater <= 0) {
-      alert('Por favor, insira um valor válido maior que zero.');
+      mostrarNotificacao('Por favor, insira um valor válido maior que zero.', 'erro');
       return;
     }
 
     if (valorAAbater > participante.saldo_devedor) {
-      alert(`O valor digitado (${formatarMoeda(valorAAbater)}) não pode ser maior que o saldo devedor atual (${formatarMoeda(participante.saldo_devedor)}).`);
+      mostrarNotificacao(`O valor digitado (${formatarMoeda(valorAAbater)}) não pode ser maior que o saldo devedor atual (${formatarMoeda(participante.saldo_devedor)}).`, 'erro');
       return;
     }
 
@@ -171,9 +325,10 @@ export default function App() {
         tipo: 'fixo',
         valorPersonalizado: '',
       });
+      mostrarNotificacao('Pagamento registrado com sucesso.');
     } catch (error) {
       console.error('Erro ao atualizar o saldo: ', error);
-      alert('Erro ao registar o pagamento.');
+      mostrarNotificacao('Erro ao registar o pagamento.', 'erro');
     }
   };
 
@@ -183,16 +338,17 @@ export default function App() {
 
     try {
       await deleteDoc(doc(db, 'Participantes', id));
+      mostrarNotificacao('Participante excluído com sucesso.');
     } catch (error) {
       console.error('Erro ao excluir documento: ', error);
-      alert('Erro ao excluir o participante.');
+      mostrarNotificacao('Erro ao excluir o participante.', 'erro');
     }
   };
 
   const handleLembreteWhatsApp = (participante) => {
     const numeroLimpo = participante.celular.replace(/\D/g, '');
     if (numeroLimpo.length < 10) {
-      alert('O número de telemóvel registado parece estar inválido ou em falta.');
+      mostrarNotificacao('O número de telemóvel registado parece estar inválido ou em falta.', 'erro');
       return;
     }
     const mensagem = `Olá ${participante.nome}! Tudo bem? Passando para relembrar do vencimento da sua parcela do acampamento no valor de ${formatarMoeda(participante.valor_parcela)}, programada para o dia ${participante.dia_vencimento}. Qualquer dúvida, estou à disposição!`;
@@ -207,16 +363,76 @@ export default function App() {
     valorPersonalizado: '',
   });
 
+  if (carregandoAuth) {
+    return (
+      <main className="auth-screen">
+        <section className="auth-card" aria-live="polite">
+          <img className="brand-logo auth-brand-logo" src={logo} alt="" />
+          <p>Verificando sua sessão...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!usuario) {
+    return (
+      <main className="auth-screen">
+        <section className="auth-card">
+          <a className="brand auth-brand" href="#inicio" aria-label="Acampa">
+            <img className="brand-logo auth-brand-logo" src={logo} alt="" />
+            <span className="brand-copy"><strong>acampa</strong><small>gestão do acampamento</small></span>
+          </a>
+          <div className="auth-heading">
+            <span className="section-kicker">ÁREA RESTRITA</span>
+            <h1>Acesse sua conta</h1>
+            <p>Entre com seu e-mail e senha para continuar.</p>
+          </div>
+          <form className="auth-form" onSubmit={handleEntrar}>
+            <label className="field">
+              <span>E-mail</span>
+              <input
+                type="email"
+                value={emailLogin}
+                onChange={(event) => setEmailLogin(event.target.value)}
+                placeholder="seu@email.com"
+                autoComplete="username"
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Senha</span>
+              <input
+                type="password"
+                value={senhaLogin}
+                onChange={(event) => setSenhaLogin(event.target.value)}
+                placeholder="Sua senha"
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            {erroLogin && <p className="auth-error" role="alert">{erroLogin}</p>}
+            <button className="button button-primary auth-submit" type="submit" disabled={carregandoLogin}>
+              {carregandoLogin ? 'Entrando...' : 'Entrar'}
+              {!carregandoLogin && <span aria-hidden="true">→</span>}
+            </button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className="app-shell">
+      {notificacao && (
+        <div className={`toast toast-${notificacao.tipo}`} role={notificacao.tipo === 'erro' ? 'alert' : 'status'}>
+          <span className="toast-icon" aria-hidden="true">{notificacao.tipo === 'erro' ? '!' : '✓'}</span>
+          <p>{notificacao.mensagem}</p>
+          <button className="toast-close" type="button" onClick={() => setNotificacao(null)} aria-label="Fechar notificação">×</button>
+        </div>
+      )}
       <aside className="sidebar">
         <a className="brand" href="#inicio" aria-label="Acampa, início">
-          <span className="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 32 32" fill="none">
-              <path d="M5 25 16 6l11 19H5Z" stroke="currentColor" strokeWidth="2.4" strokeLinejoin="round" />
-              <path d="m11 25 5-9 5 9M16 16v9" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
+          <img className="brand-logo" src={logo} alt="" />
           <span className="brand-copy"><strong>acampa</strong><small>gestão do acampamento</small></span>
         </a>
 
@@ -234,9 +450,9 @@ export default function App() {
             <span>Uma experiência para guardar.</span>
           </div>
           <div className="profile">
-            <span className="avatar">AD</span>
-            <span className="profile-info"><strong>Administrador</strong><small>Gestão financeira</small></span>
-            <span className="profile-menu" aria-hidden="true">···</span>
+            <span className="avatar">{usuario.email?.charAt(0).toUpperCase() || 'U'}</span>
+            <span className="profile-info"><strong>{usuario.email}</strong><small>Sessão autenticada</small></span>
+            <button className="logout-button" onClick={handleSair}>Sair</button>
           </div>
         </div>
       </aside>
@@ -246,7 +462,9 @@ export default function App() {
           <div className="breadcrumb"><span>Painel</span><span className="breadcrumb-separator">/</span><strong>Visão geral</strong></div>
           <div className="topbar-right">
             <span className="sync-status"><span className="status-dot" /> Dados sincronizados</span>
-            <span className="topbar-avatar" aria-label="Administrador">AD</span>
+            <span className="topbar-avatar" aria-label={usuario.email || 'Usuário autenticado'}>
+              {usuario.email?.charAt(0).toUpperCase() || 'U'}
+            </span>
           </div>
         </header>
 
@@ -317,10 +535,23 @@ export default function App() {
                   <input type="tel" value={celular} onChange={(event) => setCelular(formatarCelular(event.target.value))} placeholder="(11) 99999-9999" autoComplete="tel" />
                 </label>
                 <label className="field field-full">
-                  <span>Lote</span>
-                  <select value={loteSelecionado} onChange={(event) => setLoteSelecionado(Number(event.target.value))}>
-                    {lotes.map((lote) => <option key={lote.id} value={lote.valor}>{lote.nome} · {formatarMoeda(lote.valor)}</option>)}
+                  <span className="field-label-row">
+                    <span>Lote</span>
+                    <button className="text-button" type="button" onClick={() => setModalLotesAberto(true)}>Gerenciar lotes</button>
+                  </span>
+                  <select
+                    value={loteSelecionado}
+                    onChange={(event) => setLoteSelecionado(event.target.value)}
+                    disabled={carregandoLotes || lotesAtivos.length === 0}
+                    required
+                  >
+                    {lotesAtivos.length === 0
+                      ? <option value="">{carregandoLotes ? 'Carregando lotes...' : 'Cadastre um lote para continuar'}</option>
+                      : lotesAtivos.map((lote) => <option key={lote.id} value={lote.id}>{lote.nome} · {formatarMoeda(lote.valor)}</option>)}
                   </select>
+                  {!carregandoLotes && lotesAtivos.length === 0 && (
+                    <small className="field-hint">Cadastre e habilite pelo menos um lote para fazer inscrições.</small>
+                  )}
                 </label>
                 <div className="field-row field-full">
                   <label className="field">
@@ -342,21 +573,10 @@ export default function App() {
                   </label>
                   <label className="field">
                     <span>Vencimento (dia) <span className="required">*</span></span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="31"
-                      value={diaVencimento}
-                      onChange={(event) => {
-                        const valor = event.target.value;
-                        if (valor === '') setDiaVencimento('');
-                        else if (Number(valor) > 31) setDiaVencimento(31);
-                        else if (Number(valor) < 1) setDiaVencimento(1);
-                        else setDiaVencimento(Number(valor));
-                      }}
-                      placeholder="Dia"
-                      required
-                    />
+                    <select value={diaVencimento} onChange={(event) => setDiaVencimento(event.target.value)} required>
+                      <option value="">Selecione o dia</option>
+                      {diasVencimento.map((dia) => <option key={dia} value={dia}>{dia}</option>)}
+                    </select>
                   </label>
                 </div>
                 <div className="installment-preview field-full">
@@ -496,6 +716,17 @@ export default function App() {
                 <span><strong>Parcela fixa</strong><small>Valor da parcela cadastrada</small></span>
                 <b>{formatarMoeda(modalPagamento.participante?.valor_parcela)}</b>
               </label>
+              <label className={`payment-option ${modalPagamento.tipo === 'avista' ? 'selected' : ''}`}>
+                <input
+                  type="radio"
+                  name="tipo_pagamento"
+                  checked={modalPagamento.tipo === 'avista'}
+                  onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'avista' })}
+                />
+                <span className="radio-custom" />
+                <span><strong>Pagamento à vista</strong><small>Quitar todo o saldo pendente</small></span>
+                <b>{formatarMoeda(modalPagamento.participante?.saldo_devedor)}</b>
+              </label>
               <label className={`payment-option ${modalPagamento.tipo === 'outro' ? 'selected' : ''}`}>
                 <input
                   type="radio"
@@ -525,6 +756,72 @@ export default function App() {
               <button className="button button-secondary" onClick={fecharModal}>Cancelar</button>
               <button className="button button-primary" onClick={confirmarPagamento}>Confirmar pagamento <span aria-hidden="true">→</span></button>
             </div>
+          </section>
+        </div>
+      )}
+
+      {modalLotesAberto && (
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalLotesAberto(false); }}>
+          <section className="payment-modal lot-manager-modal" role="dialog" aria-modal="true" aria-labelledby="lots-title">
+            <div className="modal-heading">
+              <span className="modal-icon" aria-hidden="true">▤</span>
+              <button className="modal-close" type="button" onClick={() => setModalLotesAberto(false)} aria-label="Fechar">×</button>
+              <span className="section-kicker">INSCRIÇÕES</span>
+              <h2 id="lots-title">Gerenciar lotes</h2>
+              <p>Cadastre valores e escolha quais aparecem nas novas inscrições.</p>
+            </div>
+
+            <form className="lot-form" onSubmit={handleSalvarLote}>
+              <label className="field">
+                <span>Nome do lote</span>
+                <input
+                  type="text"
+                  value={nomeNovoLote}
+                  onChange={(event) => setNomeNovoLote(event.target.value)}
+                  placeholder="Ex.: Lote promocional"
+                  required
+                />
+              </label>
+              <label className="field">
+                <span>Valor</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={valorNovoLote}
+                  onChange={(event) => setValorNovoLote(event.target.value)}
+                  placeholder="0,00"
+                  required
+                />
+              </label>
+              <button className="button button-primary lot-submit" type="submit">Cadastrar lote <span aria-hidden="true">＋</span></button>
+            </form>
+
+            <div className="lot-list-heading">
+              <strong>Lotes cadastrados</strong>
+              <span>{lotes.length}</span>
+            </div>
+            {lotes.length > 0 ? (
+              <ul className="lot-list">
+                {lotes.map((lote) => (
+                  <li className={`lot-row ${lote.ativo ? '' : 'lot-disabled'}`} key={lote.id}>
+                    <span className="lot-details">
+                      <strong>{lote.nome}</strong>
+                      <small>{formatarMoeda(lote.valor)} · {lote.ativo ? 'Disponível nas inscrições' : 'Desabilitado'}</small>
+                    </span>
+                    <button
+                      className={`button button-small ${lote.ativo ? 'button-secondary' : 'button-pay'}`}
+                      type="button"
+                      onClick={() => alternarLote(lote)}
+                    >
+                      {lote.ativo ? 'Desabilitar' : 'Habilitar'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="lot-empty">Nenhum lote cadastrado. Adicione o primeiro usando o formulário acima.</p>
+            )}
           </section>
         </div>
       )}
