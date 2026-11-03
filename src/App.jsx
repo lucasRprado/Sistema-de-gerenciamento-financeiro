@@ -1167,7 +1167,7 @@ export default function App() {
                   <h2>Novo participante</h2>
                   <p>Preencha os dados para adicionar uma inscrição.</p>
                 </div>
-                <span className="panel-heading-icon" aria-hidden="true">＋</span>
+                <span className="panel-heading-icon" aria-hidden="true">👤</span>
               </div>
 
               <form className="registration-form" onSubmit={(event) => { event.preventDefault(); handleSalvar(); }}>
