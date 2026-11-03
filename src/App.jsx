@@ -780,6 +780,69 @@ export default function App() {
     });
   };
 
+  const exportarParticipantesCSV = () => {
+    if (participantes.length === 0) {
+      mostrarNotificacao('Não há participantes cadastrados para exportar.', 'erro');
+      return;
+    }
+
+    const colunas = [
+      ['ID', (participante) => participante.id],
+      ['Número da inscrição', (participante) => participante.numero_id],
+      ['Nome', (participante) => participante.nome],
+      ['E-mail', (participante) => participante.email],
+      ['Celular', (participante) => participante.celular],
+      ['Ministério', (participante) => participante.ministerio_nome || 'Não informado'],
+      ['Status do ingresso', (participante) => participante.status_ingresso === 'anulada' ? 'Anulado' : 'Confirmado'],
+      ['Dia de vencimento', (participante) => participante.dia_vencimento],
+      ['Valor total', (participante) => participante.valor_total],
+      ['Quantidade de parcelas', (participante) => participante.quantidade_parcelas],
+      ['Valor da parcela', (participante) => participante.valor_parcela],
+      ['Saldo devedor', (participante) => participante.saldo_devedor],
+      ['Histórico de pagamentos', (participante) => (participante.historico_pagamentos || [])
+        .map((pagamento) => `${pagamento.data}: ${formatarMoeda(pagamento.valor)}`)
+        .join(' | ')],
+    ];
+    const escaparCampo = (valor) => {
+      const texto = String(valor ?? '').replace(/^[\t\r\n ]*[=+\-@]/, (inicio) => `'${inicio}`);
+      return `"${texto.replaceAll('"', '""')}"`;
+    };
+    const formatarValorCSV = (valor) => (
+      typeof valor === 'number'
+        ? valor.toLocaleString('pt-BR', { useGrouping: false, maximumFractionDigits: 2 })
+        : valor
+    );
+    const linhas = [
+      colunas.map(([titulo]) => escaparCampo(titulo)).join(';'),
+      ...participantes.map((participante) => colunas
+        .map(([, obterValor]) => escaparCampo(formatarValorCSV(obterValor(participante))))
+        .join(';')),
+    ];
+    const conteudo = `\uFEFF${linhas.join('\r\n')}`;
+    const dataAtual = new Date();
+    const dataArquivo = [
+      dataAtual.getFullYear(),
+      String(dataAtual.getMonth() + 1).padStart(2, '0'),
+      String(dataAtual.getDate()).padStart(2, '0'),
+    ].join('-');
+
+    try {
+      const arquivo = new Blob([conteudo], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(arquivo);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `inscricoes-acampa-${dataArquivo}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      mostrarNotificacao(`${participantes.length} ${participantes.length === 1 ? 'participante exportado' : 'participantes exportados'} em CSV.`);
+    } catch (error) {
+      console.error('Erro ao exportar participantes em CSV: ', error);
+      mostrarNotificacao('Não foi possível gerar o arquivo CSV.', 'erro');
+    }
+  };
+
   const fecharModal = () => setModalPagamento({
     aberto: false,
     participante: null,
@@ -1039,6 +1102,15 @@ export default function App() {
                     title="Abre a caixa de impressão do navegador para salvar a lista como PDF"
                   >
                     Exportar lista em PDF <span aria-hidden="true">↓</span>
+                  </button>
+                  <button
+                    className="button button-primary export-csv-button"
+                    type="button"
+                    onClick={exportarParticipantesCSV}
+                    disabled={participantes.length === 0}
+                    title="Exporta todos os participantes em CSV compatível com Excel"
+                  >
+                    Exportar todos em CSV <span aria-hidden="true">↓</span>
                   </button>
                   <button
                     className="button button-small button-cancel-registration bulk-delete-button"
