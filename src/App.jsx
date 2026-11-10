@@ -10,6 +10,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   setDoc,
   updateDoc,
   writeBatch,
@@ -32,6 +33,52 @@ const moeda = new Intl.NumberFormat('pt-BR', {
 const diasVencimento = [1, 5, 10, 15, 20, 25, 30];
 
 const formatarMoeda = (valor) => moeda.format(valor || 0);
+const formatarDataNascimentoInput = (valor) => {
+  const digitos = valor.replace(/\D/g, '').slice(0, 8);
+  if (digitos.length <= 2) return digitos;
+  if (digitos.length <= 4) return `${digitos.slice(0, 2)}/${digitos.slice(2)}`;
+  return `${digitos.slice(0, 2)}/${digitos.slice(2, 4)}/${digitos.slice(4)}`;
+};
+const converterDataNascimentoParaISO = (valor) => {
+  if (!valor) return '';
+  const correspondencia = valor.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!correspondencia) return null;
+
+  const [, diaTexto, mesTexto, anoTexto] = correspondencia;
+  const dia = Number(diaTexto);
+  const mes = Number(mesTexto);
+  const ano = Number(anoTexto);
+  const anoBissexto = ano % 4 === 0 && (ano % 100 !== 0 || ano % 400 === 0);
+  const diasPorMes = [31, anoBissexto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (ano < 1 || mes < 1 || mes > 12 || dia < 1 || dia > diasPorMes[mes - 1]) return null;
+
+  const hoje = new Date();
+  const dataFutura = ano > hoje.getFullYear()
+    || (ano === hoje.getFullYear() && mes > hoje.getMonth() + 1)
+    || (ano === hoje.getFullYear() && mes === hoje.getMonth() + 1 && dia > hoje.getDate());
+  if (dataFutura) return null;
+
+  return `${anoTexto}-${mesTexto}-${diaTexto}`;
+};
+const formatarDataNascimento = (valor) => {
+  if (!valor) return 'Não informado';
+  const correspondencia = valor.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!correspondencia) return 'Não informado';
+  return `${correspondencia[3]}/${correspondencia[2]}/${correspondencia[1]}`;
+};
+const somarHistorico = (historico) => (Array.isArray(historico)
+  ? historico.reduce((total, registro) => total + (Number(registro.valor) || 0), 0)
+  : 0);
+const calcularTotalPago = (participante) => {
+  const historicoPagamentos = participante.historico_pagamentos || [];
+  return historicoPagamentos.length > 0
+    ? somarHistorico(historicoPagamentos)
+    : Math.max(0, (Number(participante.valor_total) || 0) - (Number(participante.saldo_devedor) || 0));
+};
+const calcularDevolucaoPendente = (participante) => Math.max(
+  0,
+  Math.round((calcularTotalPago(participante) - somarHistorico(participante.historico_devolucoes)) * 100) / 100,
+);
 const obterProximoVencimento = (dia, referencia = new Date()) => {
   const diaNumerico = Number(dia);
   if (!Number.isInteger(diaNumerico) || diaNumerico < 1 || diaNumerico > 31) return Infinity;
@@ -61,6 +108,9 @@ export default function App() {
   const [nome, setNome] = useState('');
   const [email, setEmail] = useState('');
   const [celular, setCelular] = useState('');
+  const [dataNascimento, setDataNascimento] = useState('');
+  const [responsavel, setResponsavel] = useState('');
+  const [telefoneResponsavel, setTelefoneResponsavel] = useState('');
   const [ministerios, setMinisterios] = useState([]);
   const [carregandoMinisterios, setCarregandoMinisterios] = useState(true);
   const [nomeNovoMinisterio, setNomeNovoMinisterio] = useState('');
@@ -97,6 +147,7 @@ export default function App() {
     participante: null,
     tipo: 'fixo',
     valorPersonalizado: '',
+    operacao: 'pagamento',
   });
   const [modalExclusaoTodas, setModalExclusaoTodas] = useState({
     aberto: false,
@@ -134,6 +185,7 @@ export default function App() {
   const ministeriosAtivos = ministerios.filter((ministerio) => ministerio.ativo);
   const loteAtual = lotesAtivos.find((lote) => lote.id === loteSelecionado);
   const ministerioAtual = ministeriosAtivos.find((ministerio) => ministerio.id === ministerioSelecionado);
+  const ministerioDrop = ministerioAtual?.nome?.trim().toLocaleUpperCase('pt-BR') === 'DROP';
   const valorParcela = loteAtual && parcelas > 0 ? (loteAtual.valor / parcelas).toFixed(2) : '0.00';
 
   useEffect(() => {
@@ -307,6 +359,18 @@ export default function App() {
   const totalEsperado = participantesConfirmados.reduce((acc, participante) => acc + (participante.valor_total || 0), 0);
   const totalPendente = participantesConfirmados.reduce((acc, participante) => acc + (participante.saldo_devedor || 0), 0);
   const totalRecebido = totalEsperado - totalPendente;
+  const desistenciasComDevolucao = participantes
+    .filter((participante) => participante.status_ingresso === 'anulada')
+    .map((participante) => ({
+      ...participante,
+      devolucao_pendente: calcularDevolucaoPendente(participante),
+    }))
+    .filter((participante) => participante.devolucao_pendente > 0);
+  const totalDevolucoesPendentes = desistenciasComDevolucao.reduce(
+    (total, participante) => total + participante.devolucao_pendente,
+    0,
+  );
+  const operacaoDevolucao = modalPagamento.operacao === 'devolucao';
   const referenciaOrdenacao = new Date();
   const participantesFiltrados = participantes.filter((participante) => {
     const busca = termoPesquisa.toLowerCase();
@@ -541,6 +605,12 @@ export default function App() {
       return;
     }
 
+    const dataNascimentoISO = converterDataNascimentoParaISO(dataNascimento);
+    if (dataNascimento && !dataNascimentoISO) {
+      mostrarNotificacao('Informe uma data de nascimento válida, no formato DD/MM/AAAA, que não seja futura.', 'erro');
+      return;
+    }
+
     try {
       const q = query(collection(db, 'Participantes'), orderBy('numero_id', 'desc'), limit(1));
       const querySnapshot = await getDocs(q);
@@ -555,6 +625,9 @@ export default function App() {
         nome,
         email: email.trim(),
         celular,
+        data_nascimento: dataNascimentoISO || null,
+        responsavel: ministerioDrop ? responsavel.trim() : null,
+        telefone_responsavel: ministerioDrop ? telefoneResponsavel : null,
         status_ingresso: 'confirmada',
         ministerio_id: ministerioAtual.id,
         ministerio_nome: ministerioAtual.nome,
@@ -569,6 +642,9 @@ export default function App() {
       setNome('');
       setEmail('');
       setCelular('');
+      setDataNascimento('');
+      setResponsavel('');
+      setTelefoneResponsavel('');
       setMinisterioSelecionado('');
       setDiaVencimento('');
       setParcelas(1);
@@ -604,11 +680,90 @@ export default function App() {
       participante,
       tipo: 'fixo',
       valorPersonalizado: '',
+      operacao: 'pagamento',
+    });
+  };
+
+  const abrirModalDevolucao = (participante) => {
+    setModalPagamento({
+      aberto: true,
+      participante,
+      tipo: 'avista',
+      valorPersonalizado: '',
+      operacao: 'devolucao',
     });
   };
 
   const confirmarPagamento = async () => {
     const participante = modalPagamento.participante;
+    if (!participante) return;
+
+    if (modalPagamento.operacao === 'devolucao') {
+      const valorADevolver = modalPagamento.tipo === 'avista'
+        ? calcularDevolucaoPendente(participante)
+        : Number(Number(modalPagamento.valorPersonalizado).toFixed(2));
+
+      if (!valorADevolver || valorADevolver <= 0) {
+        mostrarNotificacao('Informe um valor válido maior que zero para a devolução.', 'erro');
+        return;
+      }
+
+      if (valorADevolver > calcularDevolucaoPendente(participante)) {
+        mostrarNotificacao('O valor não pode ser maior que a devolução pendente.', 'erro');
+        return;
+      }
+
+      const confirmar = window.confirm(
+        `Registrar a devolução de ${formatarMoeda(valorADevolver)} para ${participante.nome}?`,
+      );
+      if (!confirmar) return;
+
+      const novaDevolucao = {
+        data: new Date().toLocaleString('pt-BR'),
+        valor: Number(valorADevolver.toFixed(2)),
+      };
+
+      try {
+        const participanteRef = doc(db, 'Participantes', participante.id);
+        const resultado = await runTransaction(db, async (transaction) => {
+          const snapshot = await transaction.get(participanteRef);
+          if (!snapshot.exists()) return 'nao-encontrado';
+
+          const dadosAtuais = snapshot.data();
+          if (dadosAtuais.status_ingresso !== 'anulada') return 'inscricao-reativada';
+          if (valorADevolver > calcularDevolucaoPendente(dadosAtuais)) return 'valor-excedido';
+
+          transaction.update(participanteRef, {
+            historico_devolucoes: arrayUnion(novaDevolucao),
+          });
+          return 'registrada';
+        });
+
+        if (resultado !== 'registrada') {
+          const mensagens = {
+            'nao-encontrado': 'A inscrição não foi encontrada. Atualize o painel e tente novamente.',
+            'inscricao-reativada': 'Esta inscrição foi reativada. Só é possível registrar devolução para inscrições anuladas.',
+            'valor-excedido': 'O valor pendente mudou e agora é menor que o informado. Atualize o painel e tente novamente.',
+          };
+          mostrarNotificacao(mensagens[resultado] || 'Não foi possível validar a devolução.', 'erro');
+          return;
+        }
+
+        setModalPagamento({
+          aberto: false,
+          participante: null,
+          tipo: 'fixo',
+          valorPersonalizado: '',
+          operacao: 'pagamento',
+        });
+        mostrarNotificacao('Devolução registrada com sucesso.');
+      } catch (error) {
+        console.error('Erro ao registrar a devolução: ', error);
+        mostrarNotificacao('Não foi possível registrar a devolução. Tente novamente.', 'erro');
+      }
+      return;
+    }
+
     const valorAAbater = modalPagamento.tipo === 'fixo'
       ? participante.valor_parcela
       : modalPagamento.tipo === 'avista'
@@ -647,6 +802,7 @@ export default function App() {
         participante: null,
         tipo: 'fixo',
         valorPersonalizado: '',
+        operacao: 'pagamento',
       });
       mostrarNotificacao('Pagamento registrado com sucesso.');
     } catch (error) {
@@ -790,9 +946,17 @@ export default function App() {
       ['ID', (participante) => participante.id],
       ['Número da inscrição', (participante) => participante.numero_id],
       ['Nome', (participante) => participante.nome],
+      ['Data de nascimento', (participante) => formatarDataNascimento(participante.data_nascimento)],
       ['E-mail', (participante) => participante.email],
       ['Celular', (participante) => participante.celular],
+      ['Responsável', (participante) => participante.responsavel],
+      ['Telefone do responsável', (participante) => participante.telefone_responsavel],
       ['Ministério', (participante) => participante.ministerio_nome || 'Não informado'],
+      ['Total devolvido', (participante) => somarHistorico(participante.historico_devolucoes)],
+      ['Devolução pendente', (participante) => calcularDevolucaoPendente(participante)],
+      ['Histórico de devoluções', (participante) => (participante.historico_devolucoes || [])
+        .map((devolucao) => `${devolucao.data}: ${formatarMoeda(devolucao.valor)}`)
+        .join(' | ')],
       ['Status do ingresso', (participante) => participante.status_ingresso === 'anulada' ? 'Anulado' : 'Confirmado'],
       ['Dia de vencimento', (participante) => participante.dia_vencimento],
       ['Valor total', (participante) => participante.valor_total],
@@ -848,6 +1012,7 @@ export default function App() {
     participante: null,
     tipo: 'fixo',
     valorPersonalizado: '',
+    operacao: 'pagamento',
   });
 
   if (carregandoAuth) {
@@ -1020,6 +1185,48 @@ export default function App() {
             </article>
           </section>
 
+          <section className="panel refunds-panel" aria-labelledby="refunds-title">
+            <div className="panel-heading refunds-heading">
+              <div>
+                <span className="section-kicker">FINANCEIRO</span>
+                <h2 id="refunds-title">Devoluções pendentes</h2>
+                <p>Inscrições anuladas com valores pagos que ainda precisam ser devolvidos.</p>
+              </div>
+              <div className="refund-total">
+                <span>Total a devolver</span>
+                <strong>{formatarMoeda(totalDevolucoesPendentes)}</strong>
+              </div>
+            </div>
+            {desistenciasComDevolucao.length > 0 ? (
+              <ul className="refund-list">
+                {desistenciasComDevolucao.map((participante) => (
+                  <li className="refund-row" key={participante.id}>
+                    <span className="refund-participant">
+                      <strong>{participante.nome || 'Nome não informado'}</strong>
+                      <small>{participante.id}</small>
+                    </span>
+                    <span className="refund-values">
+                      <small>
+                        Pago {formatarMoeda(calcularTotalPago(participante))}
+                        {' · '}Devolvido {formatarMoeda(somarHistorico(participante.historico_devolucoes))}
+                      </small>
+                      <strong>{formatarMoeda(participante.devolucao_pendente)}</strong>
+                    </span>
+                    <button
+                      className="button button-small button-pay refund-action"
+                      type="button"
+                      onClick={() => abrirModalDevolucao(participante)}
+                    >
+                      Registrar devolução
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="refund-empty">Não há devoluções pendentes no momento.</p>
+            )}
+          </section>
+
           <section className="workspace-grid">
             <section className="panel participants-panel" id="participantes">
               <div className="participants-heading">
@@ -1146,6 +1353,7 @@ export default function App() {
                   <tbody>
                     {participantesFiltrados.map((participante) => {
                       const pagamentos = participante.historico_pagamentos || [];
+                      const devolucoes = participante.historico_devolucoes || [];
                       const statusIngresso = participante.status_ingresso === 'anulada' ? 'anulada' : 'confirmada';
                       const emailNormalizado = participante.email?.trim().toLocaleLowerCase('pt-BR');
                       const quantidadeMesmoEmail = emailNormalizado ? inscricoesPorEmail.get(emailNormalizado) || 0 : 0;
@@ -1157,6 +1365,9 @@ export default function App() {
                               <span className="participant-info">
                                 <strong>{participante.nome}</strong>
                                 <small>{participante.email || participante.id}</small>
+                                {participante.data_nascimento && (
+                                  <small>Nascimento: {formatarDataNascimento(participante.data_nascimento)}</small>
+                                )}
                                 {quantidadeMesmoEmail > 1 && (
                                   <span className="duplicate-label">
                                     E-mail em {quantidadeMesmoEmail} inscrições · revise
@@ -1184,6 +1395,19 @@ export default function App() {
                                 </ul>
                               </details>
                             ) : <span className="history-empty">Nenhum pagamento</span>}
+                            {devolucoes.length > 0 && (
+                              <details className="payment-history refund-history">
+                                <summary>{devolucoes.length} {devolucoes.length === 1 ? 'devolução' : 'devoluções'}</summary>
+                                <ul className="payment-history-list">
+                                  {devolucoes.map((devolucao, index) => (
+                                    <li key={`${devolucao.data}-${index}`}>
+                                      <span>{devolucao.data}</span>
+                                      <strong>{formatarMoeda(devolucao.valor)}</strong>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </details>
+                            )}
                           </td>
                           <td>
                             <span className={`balance ${participante.saldo_devedor > 0 ? 'balance-pending' : 'balance-paid'}`}>
@@ -1256,10 +1480,32 @@ export default function App() {
                   <input type="tel" value={celular} onChange={(event) => setCelular(formatarCelular(event.target.value))} placeholder="(11) 99999-9999" autoComplete="tel" />
                 </label>
                 <label className="field field-full">
+                  <span>Data de nascimento</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="\d{2}/\d{2}/\d{4}"
+                    maxLength={10}
+                    value={dataNascimento}
+                    onChange={(event) => setDataNascimento(formatarDataNascimentoInput(event.target.value))}
+                    placeholder="DD/MM/AAAA"
+                    autoComplete="bday"
+                    aria-label="Data de nascimento no formato dia, mês e ano"
+                  />
+                  <small className="field-hint">Digite apenas números. A data deve estar no formato DD/MM/AAAA.</small>
+                </label>
+                <label className="field field-full">
                   <span>Ministério responsável <span className="required">*</span></span>
                   <select
                     value={ministerioSelecionado}
-                    onChange={(event) => setMinisterioSelecionado(event.target.value)}
+                    onChange={(event) => {
+                      const ministerio = ministeriosAtivos.find((item) => item.id === event.target.value);
+                      setMinisterioSelecionado(event.target.value);
+                      if (ministerio?.nome?.trim().toLocaleUpperCase('pt-BR') !== 'DROP') {
+                        setResponsavel('');
+                        setTelefoneResponsavel('');
+                      }
+                    }}
                     disabled={carregandoMinisterios || ministeriosAtivos.length === 0}
                     required
                   >
@@ -1271,6 +1517,31 @@ export default function App() {
                     <small className="field-hint">Cadastre e habilite pelo menos um ministério para fazer inscrições.</small>
                   )}
                 </label>
+                {ministerioDrop && (
+                  <div className="field-row field-full">
+                    <label className="field">
+                      <span>Responsável</span>
+                      <input
+                        type="text"
+                        value={responsavel}
+                        onChange={(event) => setResponsavel(event.target.value)}
+                        placeholder="Nome do responsável"
+                        autoComplete="name"
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Telefone do Responsável</span>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        value={telefoneResponsavel}
+                        onChange={(event) => setTelefoneResponsavel(formatarCelular(event.target.value))}
+                        placeholder="(11) 99999-9999"
+                        autoComplete="tel"
+                      />
+                    </label>
+                  </div>
+                )}
                 <label className="field field-full">
                   <span className="field-label-row">
                     <span>Lote</span>
@@ -1410,39 +1681,62 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) fecharModal(); }}>
           <section className="payment-modal" role="dialog" aria-modal="true" aria-labelledby="payment-title">
             <div className="modal-heading">
-              <span className="modal-icon" aria-hidden="true">↗</span>
+              <span className="modal-icon" aria-hidden="true">{operacaoDevolucao ? '↙' : '↗'}</span>
               <button className="modal-close" onClick={fecharModal} aria-label="Fechar">×</button>
               <span className="section-kicker">FINANCEIRO</span>
-              <h2 id="payment-title">Registrar pagamento</h2>
-              <p>Confirme o valor recebido de <strong>{modalPagamento.participante?.nome}</strong>.</p>
+              <h2 id="payment-title">{operacaoDevolucao ? 'Registrar devolução' : 'Registrar pagamento'}</h2>
+              <p>
+                {operacaoDevolucao ? 'Confirme o valor que será devolvido para ' : 'Confirme o valor recebido de '}
+                <strong>{modalPagamento.participante?.nome}</strong>.
+              </p>
             </div>
             <div className="modal-balance">
-              <span>Saldo em aberto</span>
-              <strong>{formatarMoeda(modalPagamento.participante?.saldo_devedor)}</strong>
+              <span>{operacaoDevolucao ? 'Devolução pendente' : 'Saldo em aberto'}</span>
+              <strong>
+                {formatarMoeda(operacaoDevolucao
+                  ? calcularDevolucaoPendente(modalPagamento.participante || {})
+                  : modalPagamento.participante?.saldo_devedor)}
+              </strong>
             </div>
             <div className="payment-options">
-              <label className={`payment-option ${modalPagamento.tipo === 'fixo' ? 'selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="tipo_pagamento"
-                  checked={modalPagamento.tipo === 'fixo'}
-                  onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'fixo' })}
-                />
-                <span className="radio-custom" />
-                <span><strong>Parcela fixa</strong><small>Valor da parcela cadastrada</small></span>
-                <b>{formatarMoeda(modalPagamento.participante?.valor_parcela)}</b>
-              </label>
-              <label className={`payment-option ${modalPagamento.tipo === 'avista' ? 'selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="tipo_pagamento"
-                  checked={modalPagamento.tipo === 'avista'}
-                  onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'avista' })}
-                />
-                <span className="radio-custom" />
-                <span><strong>Pagamento à vista</strong><small>Quitar todo o saldo pendente</small></span>
-                <b>{formatarMoeda(modalPagamento.participante?.saldo_devedor)}</b>
-              </label>
+              {operacaoDevolucao ? (
+                <label className={`payment-option ${modalPagamento.tipo === 'avista' ? 'selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name="tipo_pagamento"
+                    checked={modalPagamento.tipo === 'avista'}
+                    onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'avista' })}
+                  />
+                  <span className="radio-custom" />
+                  <span><strong>Devolver todo o valor pendente</strong><small>Registrar a devolução integral</small></span>
+                  <b>{formatarMoeda(calcularDevolucaoPendente(modalPagamento.participante || {}))}</b>
+                </label>
+              ) : (
+                <>
+                  <label className={`payment-option ${modalPagamento.tipo === 'fixo' ? 'selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="tipo_pagamento"
+                      checked={modalPagamento.tipo === 'fixo'}
+                      onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'fixo' })}
+                    />
+                    <span className="radio-custom" />
+                    <span><strong>Parcela fixa</strong><small>Valor da parcela cadastrada</small></span>
+                    <b>{formatarMoeda(modalPagamento.participante?.valor_parcela)}</b>
+                  </label>
+                  <label className={`payment-option ${modalPagamento.tipo === 'avista' ? 'selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="tipo_pagamento"
+                      checked={modalPagamento.tipo === 'avista'}
+                      onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'avista' })}
+                    />
+                    <span className="radio-custom" />
+                    <span><strong>Pagamento à vista</strong><small>Quitar todo o saldo pendente</small></span>
+                    <b>{formatarMoeda(modalPagamento.participante?.saldo_devedor)}</b>
+                  </label>
+                </>
+              )}
               <label className={`payment-option ${modalPagamento.tipo === 'outro' ? 'selected' : ''}`}>
                 <input
                   type="radio"
@@ -1451,12 +1745,15 @@ export default function App() {
                   onChange={() => setModalPagamento({ ...modalPagamento, tipo: 'outro' })}
                 />
                 <span className="radio-custom" />
-                <span><strong>Outro valor</strong><small>Informar valor recebido</small></span>
+                <span>
+                  <strong>Outro valor</strong>
+                  <small>{operacaoDevolucao ? 'Informar valor a devolver' : 'Informar valor recebido'}</small>
+                </span>
               </label>
             </div>
             {modalPagamento.tipo === 'outro' && (
               <label className="field modal-value-field">
-                <span>Valor recebido</span>
+                <span>{operacaoDevolucao ? 'Valor a devolver' : 'Valor recebido'}</span>
                 <input
                   type="number"
                   min="0.01"
@@ -1470,7 +1767,9 @@ export default function App() {
             )}
             <div className="modal-actions">
               <button className="button button-secondary" onClick={fecharModal}>Cancelar</button>
-              <button className="button button-primary" onClick={confirmarPagamento}>Confirmar pagamento <span aria-hidden="true">→</span></button>
+              <button className="button button-primary" onClick={confirmarPagamento}>
+                {operacaoDevolucao ? 'Confirmar devolução' : 'Confirmar pagamento'} <span aria-hidden="true">→</span>
+              </button>
             </div>
           </section>
         </div>
@@ -1664,10 +1963,21 @@ export default function App() {
                   <td>
                     <strong>{participante.nome || 'Nome não informado'}</strong>
                     <small>{participante.id}</small>
+                    {participante.data_nascimento && (
+                      <small>Nascimento: {formatarDataNascimento(participante.data_nascimento)}</small>
+                    )}
+                    {participante.responsavel && (
+                      <small>Responsável: {participante.responsavel}</small>
+                    )}
+                    {participante.telefone_responsavel && (
+                      <small>Telefone do responsável: {participante.telefone_responsavel}</small>
+                    )}
                   </td>
                   <td>
                     <span>{participante.celular || 'Celular não informado'}</span>
                     {participante.email && <small>{participante.email}</small>}
+                    {participante.responsavel && <small>Responsável: {participante.responsavel}</small>}
+                    {participante.telefone_responsavel && <small>Telefone do responsável: {participante.telefone_responsavel}</small>}
                   </td>
                   <td>{participante.ministerio_nome || 'Não informado'}</td>
                   <td>{participante.dia_vencimento ? `Dia ${participante.dia_vencimento}` : 'Não informado'}</td>
