@@ -116,6 +116,13 @@ export default function App() {
   const [nomeNovoMinisterio, setNomeNovoMinisterio] = useState('');
   const [ministerioEmEdicao, setMinisterioEmEdicao] = useState(null);
   const [ministerioSelecionado, setMinisterioSelecionado] = useState('');
+  const [eventos, setEventos] = useState([]);
+  const [carregandoEventos, setCarregandoEventos] = useState(true);
+  const [eventoSelecionado, setEventoSelecionado] = useState('');
+  const [modalEventosAberto, setModalEventosAberto] = useState(false);
+  const [ministerioGerenciadorEvento, setMinisterioGerenciadorEvento] = useState('');
+  const [nomeNovoEvento, setNomeNovoEvento] = useState('');
+  const [eventoEmEdicao, setEventoEmEdicao] = useState(null);
   const [filtroMinisterio, setFiltroMinisterio] = useState('');
   const [filtroStatusIngresso, setFiltroStatusIngresso] = useState('');
   const [filtroDiaVencimento, setFiltroDiaVencimento] = useState('');
@@ -186,6 +193,14 @@ export default function App() {
   const loteAtual = lotesAtivos.find((lote) => lote.id === loteSelecionado);
   const ministerioAtual = ministeriosAtivos.find((ministerio) => ministerio.id === ministerioSelecionado);
   const ministerioDrop = ministerioAtual?.nome?.trim().toLocaleUpperCase('pt-BR') === 'DROP';
+  const eventosAtivos = eventos.filter(
+    (evento) => evento.ativo && evento.ministerio_id === ministerioSelecionado,
+  );
+  const eventoAtual = eventosAtivos.find((evento) => evento.id === eventoSelecionado)
+    || eventosAtivos[0];
+  const eventosDoMinisterioGerenciado = eventos.filter(
+    (evento) => evento.ministerio_id === ministerioGerenciadorEvento,
+  );
   const valorParcela = loteAtual && parcelas > 0 ? (loteAtual.valor / parcelas).toFixed(2) : '0.00';
 
   useEffect(() => {
@@ -244,6 +259,30 @@ export default function App() {
       console.error('Erro ao carregar ministérios: ', error);
       mostrarNotificacao('Não foi possível carregar os ministérios cadastrados.', 'erro');
       setCarregandoMinisterios(false);
+    });
+    return () => unsubscribe();
+  }, [usuario]);
+
+  useEffect(() => {
+    if (!usuario) {
+      setEventos([]);
+      setEventoSelecionado('');
+      setCarregandoEventos(false);
+      return undefined;
+    }
+
+    setCarregandoEventos(true);
+    const unsubscribe = onSnapshot(collection(db, 'Eventos'), (snapshot) => {
+      const lista = snapshot.docs.map((evento) => ({
+        id: evento.id,
+        ...evento.data(),
+      })).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+      setEventos(lista);
+      setCarregandoEventos(false);
+    }, (error) => {
+      console.error('Erro ao carregar eventos: ', error);
+      mostrarNotificacao('Não foi possível carregar os eventos cadastrados.', 'erro');
+      setCarregandoEventos(false);
     });
     return () => unsubscribe();
   }, [usuario]);
@@ -374,7 +413,12 @@ export default function App() {
   const referenciaOrdenacao = new Date();
   const participantesFiltrados = participantes.filter((participante) => {
     const busca = termoPesquisa.toLowerCase();
-    const correspondeBusca = [participante.nome, participante.email, participante.ministerio_nome]
+    const correspondeBusca = [
+      participante.nome,
+      participante.email,
+      participante.ministerio_nome,
+      participante.evento_nome,
+    ]
       .some((valor) => (valor || '').toLowerCase().includes(busca));
     const correspondeMinisterio = !filtroMinisterio
       || (filtroMinisterio === 'sem-ministerio' && !participante.ministerio_id)
@@ -562,6 +606,11 @@ export default function App() {
   };
 
   const excluirMinisterio = async (ministerio) => {
+    if (eventos.some((evento) => evento.ministerio_id === ministerio.id)) {
+      mostrarNotificacao('Exclua primeiro os eventos vinculados a este ministério.', 'erro');
+      return;
+    }
+
     const participantesVinculados = participantes.filter(
       (participante) => participante.ministerio_id === ministerio.id,
     );
@@ -591,6 +640,132 @@ export default function App() {
     }
   };
 
+  const abrirGerenciadorEventos = () => {
+    const ministerioInicial = ministerios.some(
+      (ministerio) => ministerio.id === ministerioSelecionado,
+    )
+      ? ministerioSelecionado
+      : ministerios[0]?.id || '';
+    setMinisterioGerenciadorEvento(ministerioInicial);
+    setEventoEmEdicao(null);
+    setModalEventosAberto(true);
+  };
+
+  const handleSalvarEvento = async (event) => {
+    event.preventDefault();
+    const nomeLimpo = nomeNovoEvento.trim();
+    const ministerio = ministerios.find((item) => item.id === ministerioGerenciadorEvento);
+    if (!nomeLimpo || !ministerio) {
+      mostrarNotificacao('Informe o ministério e o nome do evento.', 'erro');
+      return;
+    }
+    if (eventos.some((item) => (
+      item.ministerio_id === ministerio.id
+      && item.nome.toLocaleLowerCase('pt-BR') === nomeLimpo.toLocaleLowerCase('pt-BR')
+    ))) {
+      mostrarNotificacao('Este evento já está cadastrado para o ministério selecionado.', 'erro');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'Eventos'), {
+        nome: nomeLimpo,
+        ministerio_id: ministerio.id,
+        ativo: true,
+      });
+      setNomeNovoEvento('');
+      mostrarNotificacao('Evento cadastrado e habilitado com sucesso.');
+    } catch (error) {
+      console.error('Erro ao cadastrar evento: ', error);
+      mostrarNotificacao('Não foi possível cadastrar o evento.', 'erro');
+    }
+  };
+
+  const iniciarEdicaoEvento = (evento) => {
+    setEventoEmEdicao({ id: evento.id, nome: evento.nome });
+  };
+
+  const salvarEdicaoEvento = async (event) => {
+    event.preventDefault();
+    if (!eventoEmEdicao) return;
+
+    const nomeLimpo = eventoEmEdicao.nome.trim();
+    const eventoOriginal = eventos.find((evento) => evento.id === eventoEmEdicao.id);
+    if (!nomeLimpo || !eventoOriginal) {
+      mostrarNotificacao('Informe o nome do evento.', 'erro');
+      return;
+    }
+    if (eventos.some((evento) => (
+      evento.id !== eventoEmEdicao.id
+      && evento.ministerio_id === eventoOriginal.ministerio_id
+      && evento.nome.toLocaleLowerCase('pt-BR') === nomeLimpo.toLocaleLowerCase('pt-BR')
+    ))) {
+      mostrarNotificacao('Este evento já está cadastrado para o ministério selecionado.', 'erro');
+      return;
+    }
+
+    const participantesVinculados = participantes.filter(
+      (participante) => participante.evento_id === eventoOriginal.id,
+    );
+    if (participantesVinculados.length > 499) {
+      mostrarNotificacao('Este evento tem muitas inscrições vinculadas para atualizar de uma só vez.', 'erro');
+      return;
+    }
+
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'Eventos', eventoOriginal.id), { nome: nomeLimpo });
+      participantesVinculados.forEach((participante) => {
+        batch.update(doc(db, 'Participantes', participante.id), { evento_nome: nomeLimpo });
+      });
+      await batch.commit();
+      setEventoEmEdicao(null);
+      mostrarNotificacao('Evento atualizado nas inscrições vinculadas.');
+    } catch (error) {
+      console.error('Erro ao editar evento: ', error);
+      mostrarNotificacao('Não foi possível editar o evento.', 'erro');
+    }
+  };
+
+  const alternarEvento = async (evento) => {
+    try {
+      await updateDoc(doc(db, 'Eventos', evento.id), { ativo: !evento.ativo });
+      mostrarNotificacao(evento.ativo ? 'Evento desabilitado.' : 'Evento habilitado.');
+    } catch (error) {
+      console.error('Erro ao atualizar evento: ', error);
+      mostrarNotificacao('Não foi possível atualizar o evento.', 'erro');
+    }
+  };
+
+  const excluirEvento = async (evento) => {
+    const participantesVinculados = participantes.filter(
+      (participante) => participante.evento_id === evento.id,
+    );
+    if (participantesVinculados.length > 499) {
+      mostrarNotificacao('Este evento tem muitas inscrições vinculadas para excluir de uma só vez.', 'erro');
+      return;
+    }
+
+    const confirmar = window.confirm(
+      `Excluir o evento "${evento.nome}"? ${participantesVinculados.length} inscrições manterão o nome histórico, mas ficarão sem evento associado.`,
+    );
+    if (!confirmar) return;
+
+    try {
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'Eventos', evento.id));
+      participantesVinculados.forEach((participante) => {
+        batch.update(doc(db, 'Participantes', participante.id), { evento_id: null });
+      });
+      await batch.commit();
+      if (eventoEmEdicao?.id === evento.id) setEventoEmEdicao(null);
+      mostrarNotificacao('Evento excluído. As inscrições mantiveram o nome histórico.');
+    } catch (error) {
+      console.error('Erro ao excluir evento: ', error);
+      mostrarNotificacao('Não foi possível excluir o evento.', 'erro');
+    }
+  };
+
   const handleSalvar = async () => {
     if (!nome || !diaVencimento || !parcelas || !loteAtual || !ministerioAtual) {
       if (!loteAtual) {
@@ -602,6 +777,16 @@ export default function App() {
         return;
       }
       mostrarNotificacao('Por favor, preencha os campos obrigatórios (nome, ministério, parcelas e dia de vencimento).', 'erro');
+      return;
+    }
+
+    if (!eventoAtual) {
+      mostrarNotificacao('Cadastre e selecione um evento para o ministério escolhido.', 'erro');
+      return;
+    }
+
+    if (ministerioDrop && (!responsavel.trim() || !telefoneResponsavel.trim())) {
+      mostrarNotificacao('Preencha o nome e o telefone do responsável para o ministério DROP.', 'erro');
       return;
     }
 
@@ -631,6 +816,8 @@ export default function App() {
         status_ingresso: 'confirmada',
         ministerio_id: ministerioAtual.id,
         ministerio_nome: ministerioAtual.nome,
+        evento_id: eventoAtual.id,
+        evento_nome: eventoAtual.nome,
         valor_total: loteAtual.valor,
         quantidade_parcelas: parcelas,
         valor_parcela: Number(valorParcela),
@@ -646,6 +833,7 @@ export default function App() {
       setResponsavel('');
       setTelefoneResponsavel('');
       setMinisterioSelecionado('');
+      setEventoSelecionado('');
       setDiaVencimento('');
       setParcelas(1);
       mostrarNotificacao('Participante cadastrado com sucesso.');
@@ -952,6 +1140,7 @@ export default function App() {
       ['Responsável', (participante) => participante.responsavel],
       ['Telefone do responsável', (participante) => participante.telefone_responsavel],
       ['Ministério', (participante) => participante.ministerio_nome || 'Não informado'],
+      ['Evento', (participante) => participante.evento_nome || 'Não informado'],
       ['Total devolvido', (participante) => somarHistorico(participante.historico_devolucoes)],
       ['Devolução pendente', (participante) => calcularDevolucaoPendente(participante)],
       ['Histórico de devoluções', (participante) => (participante.historico_devolucoes || [])
@@ -1379,7 +1568,10 @@ export default function App() {
                               </span>
                             </div>
                           </td>
-                          <td>{participante.ministerio_nome || 'Não informado'}</td>
+                          <td>
+                            <span>{participante.ministerio_nome || 'Não informado'}</span>
+                            <small>{participante.evento_nome || 'Evento não informado'}</small>
+                          </td>
                           <td><span className="due-date">Dia {participante.dia_vencimento}</span></td>
                           <td>
                             {pagamentos.length > 0 ? (
@@ -1501,6 +1693,9 @@ export default function App() {
                     onChange={(event) => {
                       const ministerio = ministeriosAtivos.find((item) => item.id === event.target.value);
                       setMinisterioSelecionado(event.target.value);
+                      setEventoSelecionado(
+                        eventos.find((item) => item.ativo && item.ministerio_id === event.target.value)?.id || '',
+                      );
                       if (ministerio?.nome?.trim().toLocaleUpperCase('pt-BR') !== 'DROP') {
                         setResponsavel('');
                         setTelefoneResponsavel('');
@@ -1517,20 +1712,43 @@ export default function App() {
                     <small className="field-hint">Cadastre e habilite pelo menos um ministério para fazer inscrições.</small>
                   )}
                 </label>
+                <label className="field field-full">
+                  <span className="field-label-row">
+                    <span>Evento <span className="required">*</span></span>
+                    <button className="text-button" type="button" onClick={abrirGerenciadorEventos}>Gerenciar eventos</button>
+                  </span>
+                  <select
+                    value={eventoAtual?.id || ''}
+                    onChange={(event) => setEventoSelecionado(event.target.value)}
+                    disabled={carregandoEventos || eventosAtivos.length === 0 || !ministerioSelecionado}
+                    required
+                  >
+                    {eventosAtivos.length === 0
+                      ? <option value="">{carregandoEventos ? 'Carregando eventos...' : 'Cadastre um evento para este ministério'}</option>
+                      : eventosAtivos.map((evento) => <option key={evento.id} value={evento.id}>{evento.nome}</option>)}
+                  </select>
+                  {!carregandoEventos && ministerioSelecionado && eventosAtivos.length === 0 && (
+                    <small className="field-hint">Cadastre um evento para o ministério selecionado antes de fazer a inscrição.</small>
+                  )}
+                  {!ministerioSelecionado && (
+                    <small className="field-hint">Selecione um ministério para carregar seus eventos.</small>
+                  )}
+                </label>
                 {ministerioDrop && (
                   <div className="field-row field-full">
                     <label className="field">
-                      <span>Responsável</span>
+                      <span>Responsável <span className="required">*</span></span>
                       <input
                         type="text"
                         value={responsavel}
                         onChange={(event) => setResponsavel(event.target.value)}
                         placeholder="Nome do responsável"
                         autoComplete="name"
+                        required
                       />
                     </label>
                     <label className="field">
-                      <span>Telefone do Responsável</span>
+                      <span>Telefone do Responsável <span className="required">*</span></span>
                       <input
                         type="tel"
                         inputMode="numeric"
@@ -1538,6 +1756,7 @@ export default function App() {
                         onChange={(event) => setTelefoneResponsavel(formatarCelular(event.target.value))}
                         placeholder="(11) 99999-9999"
                         autoComplete="tel"
+                        required
                       />
                     </label>
                   </div>
@@ -1619,6 +1838,13 @@ export default function App() {
                 </label>
                 <button className="button button-primary ministry-submit" type="submit">Cadastrar ministério <span aria-hidden="true">＋</span></button>
               </form>
+              <button
+                className="button button-secondary event-manager-open"
+                type="button"
+                onClick={abrirGerenciadorEventos}
+              >
+                Gerenciar eventos <span aria-hidden="true">◇</span>
+              </button>
               {ministerios.length > 0 ? (
                 <ul className="ministry-list">
                   {ministerios.map((ministerio) => (
@@ -1926,6 +2152,115 @@ export default function App() {
           </section>
         </div>
       )}
+      {modalEventosAberto && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setModalEventosAberto(false);
+          }}
+        >
+          <section className="payment-modal lot-manager-modal" role="dialog" aria-modal="true" aria-labelledby="events-title">
+            <div className="modal-heading">
+              <span className="modal-icon" aria-hidden="true">◇</span>
+              <button className="modal-close" type="button" onClick={() => setModalEventosAberto(false)} aria-label="Fechar">×</button>
+              <span className="section-kicker">ORGANIZAÇÃO</span>
+              <h2 id="events-title">Gerenciar eventos</h2>
+              <p>Cada evento pertence a um ministério e pode ser selecionado nas inscrições correspondentes.</p>
+            </div>
+
+            <form className="lot-form" onSubmit={handleSalvarEvento}>
+              <label className="field">
+                <span>Ministério</span>
+                <select
+                  value={ministerioGerenciadorEvento}
+                  onChange={(event) => {
+                    setMinisterioGerenciadorEvento(event.target.value);
+                    setEventoEmEdicao(null);
+                  }}
+                  required
+                >
+                  <option value="">Selecione um ministério</option>
+                  {ministerios.map((ministerio) => (
+                    <option key={ministerio.id} value={ministerio.id}>{ministerio.nome}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Nome do evento</span>
+                <input
+                  type="text"
+                  value={nomeNovoEvento}
+                  onChange={(event) => setNomeNovoEvento(event.target.value)}
+                  placeholder="Ex.: Acampamento de verão"
+                  required
+                />
+              </label>
+              <button className="button button-primary lot-submit" type="submit" disabled={!ministerios.length}>
+                Cadastrar evento <span aria-hidden="true">＋</span>
+              </button>
+            </form>
+
+            <div className="lot-list-heading">
+              <strong>Eventos do ministério selecionado</strong>
+              <span>{eventosDoMinisterioGerenciado.length}</span>
+            </div>
+            {eventosDoMinisterioGerenciado.length > 0 ? (
+              <ul className="lot-list">
+                {eventosDoMinisterioGerenciado.map((evento) => (
+                  <li className={`lot-row ${evento.ativo ? '' : 'lot-disabled'}`} key={evento.id}>
+                    {eventoEmEdicao?.id === evento.id ? (
+                      <form className="catalog-edit-form ministry-edit-form" onSubmit={salvarEdicaoEvento}>
+                        <label className="field">
+                          <span>Nome do evento</span>
+                          <input
+                            type="text"
+                            value={eventoEmEdicao.nome}
+                            onChange={(event) => setEventoEmEdicao({ ...eventoEmEdicao, nome: event.target.value })}
+                            autoFocus
+                            required
+                          />
+                        </label>
+                        <div className="catalog-actions">
+                          <button className="button button-small button-secondary" type="button" onClick={() => setEventoEmEdicao(null)}>Cancelar</button>
+                          <button className="button button-small button-primary" type="submit">Salvar</button>
+                        </div>
+                      </form>
+                    ) : (
+                      <>
+                        <span className="lot-details">
+                          <strong>{evento.nome}</strong>
+                          <small>{evento.ativo ? 'Disponível nas inscrições' : 'Desabilitado para novas inscrições'}</small>
+                        </span>
+                        <div className="catalog-actions">
+                          <button className="button button-small button-secondary" type="button" onClick={() => iniciarEdicaoEvento(evento)}>Editar</button>
+                          <button
+                            className={`catalog-switch ${evento.ativo ? 'catalog-switch-on' : ''}`}
+                            type="button"
+                            onClick={() => alternarEvento(evento)}
+                            role="switch"
+                            aria-checked={evento.ativo}
+                            aria-label={`${evento.ativo ? 'Desabilitar' : 'Habilitar'} evento ${evento.nome}`}
+                            title={evento.ativo ? 'Desabilitar evento' : 'Habilitar evento'}
+                          >
+                            <span className="catalog-switch-thumb" />
+                          </button>
+                          <button className="button button-small button-cancel-registration" type="button" onClick={() => excluirEvento(evento)}>Excluir</button>
+                        </div>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="lot-empty">
+                {ministerioGerenciadorEvento
+                  ? 'Nenhum evento cadastrado para este ministério. Adicione o primeiro usando o formulário acima.'
+                  : 'Cadastre um ministério antes de adicionar eventos.'}
+              </p>
+            )}
+          </section>
+        </div>
+      )}
       {relatorioImpressao && (
         <section className="print-report" aria-label="Relatório de participantes para impressão">
           <header className="print-report-header">
@@ -1952,6 +2287,7 @@ export default function App() {
                 <th>Participante / ID</th>
                 <th>Contato</th>
                 <th>Ministério</th>
+                <th>Evento</th>
                 <th>Vencimento</th>
                 <th>Status do ingresso</th>
               </tr>
@@ -1980,6 +2316,7 @@ export default function App() {
                     {participante.telefone_responsavel && <small>Telefone do responsável: {participante.telefone_responsavel}</small>}
                   </td>
                   <td>{participante.ministerio_nome || 'Não informado'}</td>
+                  <td>{participante.evento_nome || 'Não informado'}</td>
                   <td>{participante.dia_vencimento ? `Dia ${participante.dia_vencimento}` : 'Não informado'}</td>
                   <td>{participante.status_ingresso === 'anulada' ? 'Anulado' : 'Confirmado'}</td>
                 </tr>

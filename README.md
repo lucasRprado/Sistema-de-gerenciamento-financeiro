@@ -24,3 +24,7 @@ A tela de login bloqueia o acesso à interface e os listeners do Firestore enqua
 ## Gerenciamento de lotes
 
 Os lotes são cadastrados pelo painel em **Gerenciar lotes** e ficam salvos na coleção `Lotes` do Firestore. Cada lote tem nome, valor e status de disponibilidade; somente lotes habilitados aparecem no cadastro de participantes. As regras do Firestore devem permitir que usuários autenticados leiam e alterem essa coleção, assim como a coleção `Participantes`.
+
+## Gerenciamento de eventos
+
+Os eventos são cadastrados em **Gerenciar eventos** e ficam salvos na coleção `Eventos` do Firestore. Cada evento pertence a um único ministério por meio do campo `ministerio_id`; um ministério pode ter vários eventos. Nas inscrições, somente eventos habilitados do ministério selecionado ficam disponíveis. As inscrições guardam `evento_id` e `evento_nome`; ao excluir um evento, o vínculo é removido e o nome permanece como histórico. As regras do Firestore devem permitir que usuários autenticados leiam e alterem essa coleção.

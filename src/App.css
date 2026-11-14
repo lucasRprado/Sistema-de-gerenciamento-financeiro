@@ -797,6 +797,10 @@ h1 {
   margin: 14px 0 0;
 }
 
+.event-manager-open {
+  margin-top: 12px;
+}
+
 .panel {
   min-width: 0;
   border: 1px solid #e8ede8;
@@ -2352,6 +2356,10 @@ h1 {
 
   .lot-form {
     grid-template-columns: 1fr;
+  }
+
+  .lot-submit {
+    grid-column: auto;
   }
 
   .lot-submit {
